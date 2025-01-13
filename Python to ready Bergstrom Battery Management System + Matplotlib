@@ -1,0 +1,165 @@
+import can
+import os
+from datetime import datetime
+import time
+import matplotlib.pyplot as plt
+
+def decode_algorithm_outputs(data):
+    """Decodes Time Remaining, State of Charge, and State of Health from CAN data."""
+    time_remaining_minutes = int.from_bytes(data[0:2], byteorder='little') * 0.1 * 60
+    soc = data[2]
+    soh = data[3]
+    return time_remaining_minutes, soc, soh
+
+def decode_aux_battery_params(data):
+    """Decodes Aux Battery Voltage from CAN data."""
+    aux_battery_voltage = int.from_bytes(data[4:6], byteorder='little') * 0.01
+    return aux_battery_voltage
+
+def format_hex_data(raw_data):
+    """Formats raw data into a spaced hexadecimal string."""
+    return ' '.join(f"{byte:02X}" for byte in raw_data)
+
+def log_to_file(filename, timestamp, elapsed_time, arbitration_id, raw_data, time_remaining_minutes, soc, soh, aux_voltage):
+    """Logs all battery parameters to a file."""
+    with open(filename, 'a') as log_file:
+        log_file.write(f"Timestamp: {timestamp}\n")
+        log_file.write(f"Elapsed Time: {elapsed_time:.2f} seconds\n")
+        log_file.write(f"Arbitration ID: 0x{arbitration_id:X}\n")
+        log_file.write(f"Raw Data: {format_hex_data(raw_data)}\n")
+        
+        if time_remaining_minutes is not None:
+            log_file.write(f"Time Remaining: {time_remaining_minutes:.1f} minutes\n")
+        if soc is not None:
+            log_file.write(f"State of Charge (SoC): {soc}%\n")
+        if soh is not None:
+            log_file.write(f"State of Health (SoH): {soh}%\n")
+        if aux_voltage is not None:
+            log_file.write(f"Aux Battery Voltage: {aux_voltage:.2f} VDC\n")
+        
+        log_file.write("-" * 40 + "\n")
+
+def main():
+    bus = can.interface.Bus(channel='can0', bustype='socketcan')
+
+    # Generate dynamic log file name
+    start_time = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+    folder_name = start_time
+    os.makedirs(folder_name, exist_ok=True)
+    log_file = os.path.join(folder_name, f"log.txt")
+
+    # Initialize the log file with a header
+    with open(log_file, 'w') as file:
+        file.write("Battery Monitoring System Data Log\n")
+        file.write("=" * 40 + "\n\n")
+
+    print("Listening for CAN messages...")
+
+    # Initialize variables
+    time_remaining_minutes, soc, soh = None, None, None
+    aux_voltage = None
+
+    # Initialize matplotlib for saving plots later
+    elapsed_times = []
+    time_remaining_values = []
+    soc_values = []
+    soh_values = []  # List for SoH
+    aux_voltage_values = []  # List for Aux Battery Voltage
+    aux_elapsed_times = []  # Elapsed times for Aux Battery Voltage
+
+    try:
+        start_timer = time.time()
+        while True:
+            msg = bus.recv(1)  # Timeout set to 1 second
+            if msg:
+                # Get the current timestamp
+                timestamp = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+                elapsed_time = time.time() - start_timer
+
+                # Process messages based on their PGN (arbitration_id)
+                if msg.arbitration_id == 0x18FF02F3:  # Algorithm Outputs
+                    time_remaining_minutes, soc, soh = decode_algorithm_outputs(msg.data)
+                elif msg.arbitration_id == 0x18FF00F3:  # Aux Battery Parameters
+                    aux_voltage = decode_aux_battery_params(msg.data)
+                    aux_elapsed_times.append(elapsed_time)  # Track elapsed time for Aux Voltage
+                    aux_voltage_values.append(aux_voltage)
+                else:
+                    continue
+
+                # Clear the console and print all data together
+                os.system('clear')
+                output = f"Elapsed Time: {elapsed_time:.2f} seconds\n"
+                output += f"Timestamp: {timestamp}\n"
+                output += f"Arbitration ID: 0x{msg.arbitration_id:X}\n"
+                output += f"Raw Data: {format_hex_data(msg.data)}\n"
+
+                if time_remaining_minutes is not None:
+                    output += f"Time Remaining: {time_remaining_minutes:.1f} minutes\n"
+                    elapsed_times.append(elapsed_time)
+                    time_remaining_values.append(time_remaining_minutes)
+                if soc is not None:
+                    output += f"State of Charge (SoC): {soc}%\n"
+                    soc_values.append(soc)
+                if soh is not None:
+                    output += f"State of Health (SoH): {soh}%\n"
+                    soh_values.append(soh)
+                if aux_voltage is not None:
+                    output += f"Aux Battery Voltage: {aux_voltage:.2f} VDC\n"
+
+                print(output.strip())
+
+                # Log the data
+                log_to_file(log_file, timestamp, elapsed_time, msg.arbitration_id, msg.data, time_remaining_minutes, soc, soh, aux_voltage)
+
+    except KeyboardInterrupt:
+        print("Stopped by user.")
+    finally:
+        bus.shutdown()
+
+        # Plot Time Remaining
+        if time_remaining_values:
+            plt.figure()
+            plt.plot(elapsed_times, time_remaining_values, label="Time Remaining (minutes)")
+            plt.xlabel("Elapsed Time (seconds)")
+            plt.ylabel("Time Remaining (minutes)")
+            plt.title("Battery Time Remaining Over Time")
+            plt.legend()
+            plot_filename = os.path.join(folder_name, "plot_Elapsed_Time_vs_Time_Remaining.png")
+            plt.savefig(plot_filename)
+
+        # Plot State of Charge
+        if soc_values:
+            plt.figure()
+            plt.plot(elapsed_times[:len(soc_values)], soc_values, label="State of Charge (SoC)")
+            plt.xlabel("Elapsed Time (seconds)")
+            plt.ylabel("State of Charge (%)")
+            plt.title("State of Charge Over Time")
+            plt.legend()
+            plot_filename = os.path.join(folder_name, "plot_Elapsed_Time_vs_SoC.png")
+            plt.savefig(plot_filename)
+
+        # Plot State of Health
+        if soh_values:
+            plt.figure()
+            plt.plot(elapsed_times[:len(soh_values)], soh_values, label="State of Health (SoH)")
+            plt.xlabel("Elapsed Time (seconds)")
+            plt.ylabel("State of Health (%)")
+            plt.title("State of Health Over Time")
+            plt.legend()
+            plot_filename = os.path.join(folder_name, "plot_Elapsed_Time_vs_SoH.png")
+            plt.savefig(plot_filename)
+
+        # Plot Aux Battery Voltage
+        if aux_voltage_values:
+            plt.figure()
+            plt.plot(aux_elapsed_times, aux_voltage_values, label="Aux Battery Voltage (VDC)")
+            plt.ticklabel_format(style='plain', useOffset=False)  # Disable scientific notation
+            plt.xlabel("Elapsed Time (seconds)")
+            plt.ylabel("Aux Battery Voltage (VDC)")
+            plt.title("Aux Battery Voltage Over Time")
+            plt.legend()
+            plot_filename = os.path.join(folder_name, "plot_Elapsed_Time_vs_Aux_Battery_Voltage.png")
+            plt.savefig(plot_filename)
+
+if __name__ == "__main__":
+    main()
